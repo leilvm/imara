@@ -1,0 +1,603 @@
+openapi: 3.0.3
+info:
+  title: Imara Financial Services API
+  version: 0.1.0
+  description: |
+    MVP API for merchant onboarding, financing requests, and lender feeds.
+    East African merchant credit and remittance platform.
+
+    ## Authentication
+    All endpoints except `/api/v1/merchants/register/` and the auth token endpoints
+    require a JWT Bearer token.
+
+    Obtain tokens via `POST /api/v1/auth/token/`.
+
+    ## Error shape
+    All errors return a consistent envelope:
+    ```json
+    {
+      "error": {
+        "code": "validation_error",
+        "message": "Human-readable summary",
+        "fields": { "field_name": ["error detail"] }
+      }
+    }
+    ```
+
+servers:
+  - url: http://localhost:8000
+    description: Local development
+
+tags:
+  - name: auth
+    description: JWT token operations
+  - name: merchants
+    description: Merchant registration and profile management
+  - name: financing
+    description: Financing request lifecycle (merchant-facing)
+  - name: lender
+    description: Financing request feed and status updates (lender-facing, staff only)
+  - name: reference
+    description: Cached reference data (fee schedules)
+
+paths:
+
+  /api/v1/auth/token/:
+    post:
+      tags: [auth]
+      summary: Obtain JWT access and refresh tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: Token pair
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access:
+                    type: string
+                  refresh:
+                    type: string
+        '401':
+          $ref: '#/components/responses/AuthError'
+
+  /api/v1/auth/token/refresh/:
+    post:
+      tags: [auth]
+      summary: Refresh JWT access token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh]
+              properties:
+                refresh:
+                  type: string
+      responses:
+        '200':
+          description: New access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access:
+                    type: string
+
+  /api/v1/merchants/register/:
+    post:
+      tags: [merchants]
+      summary: Register a new merchant
+      description: |
+        Creates a Django User and linked Merchant profile in one request.
+        **No authentication required** — supports field-agent onboarding flows.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MerchantRegistrationRequest'
+            example:
+              username: merchant1
+              password: testpass123
+              business_name: Wanjiku Fresh Produce
+              business_type: sole_trader
+              phone_number: "+254712345678"
+              email: wanjiku@example.com
+              country: KE
+              town: Nairobi
+              agent_code: AGT-001
+      responses:
+        '201':
+          description: Merchant created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchantProfile'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/merchants/me/:
+    get:
+      tags: [merchants]
+      summary: Get authenticated merchant's profile
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Merchant profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchantProfile'
+        '401':
+          $ref: '#/components/responses/AuthError'
+    patch:
+      tags: [merchants]
+      summary: Update authenticated merchant's profile (partial)
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MerchantProfileUpdate'
+            example:
+              town: Mombasa
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchantProfile'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/financing/:
+    post:
+      tags: [financing]
+      summary: Submit a financing request
+      description: |
+        Creates a financing request for the authenticated merchant.
+        An async Celery alert task is queued immediately after creation —
+        the HTTP response is returned without waiting for the alert to dispatch.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinancingRequestCreate'
+            example:
+              amount_requested: "50000.00"
+              currency: KES
+              purpose: Restock fresh produce inventory before Easter peak
+              repayment_period_days: 30
+      responses:
+        '201':
+          description: Financing request created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinancingRequestMerchant'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/financing/mine/:
+    get:
+      tags: [financing]
+      summary: List my financing requests (cursor-paginated)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: Paginated list of merchant's own requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedFinancingRequestMerchant'
+
+  /api/v1/lender/requests/:
+    get:
+      tags: [lender]
+      summary: Lender — paginated financing request feed
+      description: |
+        Returns all financing requests across all merchants, newest first.
+        Filtered by `status` and/or `country` query parameters.
+        **Requires staff/lender account.**
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/RequestStatus'
+          description: Filter by request status
+        - name: country
+          in: query
+          schema:
+            type: string
+            example: KE
+          description: Filter by merchant country (ISO 3166-1 alpha-3)
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: Paginated lender-facing request list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedFinancingRequestLender'
+        '403':
+          $ref: '#/components/responses/PermissionError'
+
+  /api/v1/lender/requests/{id}/:
+    get:
+      tags: [lender]
+      summary: Lender — get single financing request
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinancingRequestLender'
+          description: Financing request detail
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [lender]
+      summary: Lender — update request status
+      description: |
+        Allowed status transitions:
+        - `pending` → `under_review`, `declined`
+        - `under_review` → `approved`, `declined`
+        - `approved` → `disbursed`
+
+        An async alert is queued after each status update.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LenderStatusUpdate'
+      responses:
+        '200':
+          description: Updated request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinancingRequestLender'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/reference/fees/:
+    get:
+      tags: [reference]
+      summary: Get platform fee schedule (cached 1 hour)
+      description: |
+        Returns indicative fee schedule for the platform.
+        Response is cached in Redis for 1 hour. The `_cached` field
+        indicates whether the response was served from cache.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Fee reference data
+          content:
+            application/json:
+              example:
+                origination_fee_pct: "2.50"
+                late_payment_fee_pct: "1.00"
+                early_repayment_fee_pct: "0.00"
+                currencies_supported: [KES, UGX, TZS, RWF]
+                min_amount: "5000.00"
+                max_amount: "10000000.00"
+                min_repayment_days: 7
+                max_repayment_days: 365
+                note: Fees are indicative and subject to credit assessment.
+                _cached: true
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    CursorParam:
+      name: cursor
+      in: query
+      schema:
+        type: string
+      description: Opaque cursor for pagination. Obtain from `next` or `previous` in a prior response.
+    PageSizeParam:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      description: Number of items per page.
+    UUIDPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+
+    RequestStatus:
+      type: string
+      enum: [pending, under_review, approved, declined, disbursed, cancelled]
+
+    MerchantRegistrationRequest:
+      type: object
+      required: [username, password, business_name, phone_number]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+          minLength: 8
+        business_name:
+          type: string
+          maxLength: 200
+        business_type:
+          type: string
+          enum: [sole_trader, partnership, limited, cooperative]
+          default: sole_trader
+        registration_number:
+          type: string
+        phone_number:
+          type: string
+        email:
+          type: string
+          format: email
+        country:
+          type: string
+          maxLength: 3
+          default: KE
+        region:
+          type: string
+        town:
+          type: string
+        agent_code:
+          type: string
+
+    MerchantProfileUpdate:
+      type: object
+      properties:
+        business_name:
+          type: string
+        business_type:
+          type: string
+          enum: [sole_trader, partnership, limited, cooperative]
+        registration_number:
+          type: string
+        phone_number:
+          type: string
+        email:
+          type: string
+          format: email
+        country:
+          type: string
+        region:
+          type: string
+        town:
+          type: string
+
+    MerchantProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        business_name:
+          type: string
+        business_type:
+          type: string
+        registration_number:
+          type: string
+        phone_number:
+          type: string
+        email:
+          type: string
+        country:
+          type: string
+        region:
+          type: string
+        town:
+          type: string
+        agent_code:
+          type: string
+        is_verified:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    FinancingRequestCreate:
+      type: object
+      required: [amount_requested, currency, purpose]
+      properties:
+        amount_requested:
+          type: string
+          format: decimal
+          example: "50000.00"
+        currency:
+          type: string
+          enum: [KES, UGX, TZS, RWF]
+          default: KES
+        purpose:
+          type: string
+        repayment_period_days:
+          type: integer
+          minimum: 7
+          maximum: 365
+          default: 30
+
+    FinancingRequestMerchant:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        amount_requested:
+          type: string
+        currency:
+          type: string
+        purpose:
+          type: string
+        repayment_period_days:
+          type: integer
+        status:
+          $ref: '#/components/schemas/RequestStatus'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    FinancingRequestLender:
+      allOf:
+        - $ref: '#/components/schemas/FinancingRequestMerchant'
+        - type: object
+          properties:
+            merchant_id:
+              type: string
+              format: uuid
+            merchant_name:
+              type: string
+            merchant_phone:
+              type: string
+            merchant_country:
+              type: string
+            lender_notes:
+              type: string
+
+    LenderStatusUpdate:
+      type: object
+      required: [status]
+      properties:
+        status:
+          $ref: '#/components/schemas/RequestStatus'
+        lender_notes:
+          type: string
+
+    PaginatedFinancingRequestMerchant:
+      type: object
+      properties:
+        next:
+          type: string
+          nullable: true
+          description: Cursor URL for the next page
+        previous:
+          type: string
+          nullable: true
+          description: Cursor URL for the previous page
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/FinancingRequestMerchant'
+
+    PaginatedFinancingRequestLender:
+      type: object
+      properties:
+        next:
+          type: string
+          nullable: true
+        previous:
+          type: string
+          nullable: true
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/FinancingRequestLender'
+
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            fields:
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  type: string
+
+  responses:
+    ValidationError:
+      description: Request body failed validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error:
+              code: validation_error
+              message: One or more fields failed validation.
+              fields:
+                phone_number: ["This phone number is already registered."]
+    AuthError:
+      description: Authentication required or credentials invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    PermissionError:
+      description: Permission denied
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
