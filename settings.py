@@ -31,15 +31,34 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    "django.middleware.security.SecurityMiddleware",
-    "django.contrib.sessions.middleware.SessionMiddleware",
-    "django.middleware.common.CommonMiddleware",
-    "django.middleware.csrf.CsrfViewMiddleware",
-    "django.contrib.auth.middleware.AuthenticationMiddleware",
-    "django.contrib.messages.middleware.MessageMiddleware",
-    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    'django.middleware.security.SecurityMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.middleware.common.CommonMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'django.contrib.messages.middleware.MessageMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # Custom Compliance Audit Middleware
+    'imara_project.middleware.AuditLogMiddleware',
 ]
 
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication',     # For Merchant & Lender API integration
+        'rest_framework.authentication.SessionAuthentication',   # For Internal Staff Dashboard workflows
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',            # Deny by default rule
+    ],
+    'DEFAULT_PAGINATION_CLASS': 'imara_project.pagination.StandardResultsSetPagination',
+    'PAGE_SIZE': 20,
+}
+
+# Session Hardening for Dashboard Actions
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SECURE = True  # Ensure HTTPS in production environments
+SESSION_COOKIE_SAMESITE = 'Strict'
+CSRF_COOKIE_HTTPONLY = True 
 ROOT_URLCONF = "imara_project.urls"
 WSGI_APPLICATION = "imara_project.wsgi.application"
 
